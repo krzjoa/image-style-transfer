@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 
+from collections import OrderedDict
+
+import lasagne
+import matplotlib.pyplot as plt
 import numpy as np
+import scipy.optimize
 import theano
 import theano.tensor as T
-import lasagne
 from lasagne.utils import floatX
-from utils import load
 from scipy.ndimage import imread
-from collections import OrderedDict
+
+from stylers.base import BaseStyler
+from utils import load
 
 first = 64
 second = 128
@@ -17,7 +22,8 @@ fourth = 512
 DUMP = "dumps/vgg19.pkl"
 
 
-class VGG19Styler(object):
+
+class VGG19StylerTheano(BaseStyler):
 
     def __init__(self):
 
@@ -35,6 +41,21 @@ class VGG19Styler(object):
         self.image_height = None
 
     def build_net(self, input_var):
+        '''
+
+        Build Lasagne model
+
+        Parameters
+        ----------
+        input_var: theano.tensor.tensor4
+            Theano tensor
+
+        Returns
+        -------
+        model: dict of lasagne.layers.Layer
+            Neural netowrk model
+
+        '''
         model = OrderedDict()
 
         model['input'] = lasagne.layers.InputLayer((None, 3,  224, 224),
@@ -96,11 +117,84 @@ class VGG19Styler(object):
         style_image_features = self.compute_features(style)
 
         # Assign image size
-        self.image_width, self.image_height = img.shape
+        _, _, self.image_width, self.image_height = img.shape
 
         # Generated image
         random_image = floatX(np.random.uniform(-128, 128, (1, 3, self.image_height, self.image_width)))
         random_image_features = self.compute_features(random_image)
+
+        random_image = theano.shared(random_image)
+
+        # Defining loss function
+        losses = []
+
+        # Content loss
+        losses.append(0.001 * content_loss(original_image_features, random_image_features, 'conv4_2'))
+
+        # Style loss
+        losses.append(0.2e6 * style_loss(style_image_features, random_image_features, 'conv1_1'))
+        losses.append(0.2e6 * style_loss(style_image_features, random_image_features, 'conv2_1'))
+        losses.append(0.2e6 * style_loss(style_image_features, random_image_features, 'conv3_1'))
+        losses.append(0.2e6 * style_loss(style_image_features, random_image_features, 'conv4_1'))
+        losses.append(0.2e6 * style_loss(style_image_features, random_image_features, 'conv5_1'))
+
+        # Total variation penalty
+        losses.append(0.1e-7 * total_variation_loss(random_image))
+
+        total_loss = sum(losses)
+
+        # Gradient
+        grad = T.grad(total_loss, random_image)
+
+        # Theano functions to evaluate loss and gradient
+        f_loss = theano.function([], total_loss)
+        f_grad = theano.function([], grad)
+
+        # Helper functions
+        def eval_loss(x0):
+            x0 = floatX(x0.reshape(1, 3, self.image_width, self.image_width))
+            random_image.set_value(x0)
+            return f_loss().astype('float64')
+
+        def eval_grad(x0):
+            x0 = floatX(x0.reshape((1, 3, self.image_width, self.image_width)))
+            random_image.set_value(x0)
+            return np.array(f_grad()).flatten().astype('float64')
+
+
+        x0 = random_image.get_value().astype('float64')
+        xs = []
+        xs.append(x0)
+
+        # Optimize, saving the result periodically
+        for i in range(8):
+            _, cost, _ = scipy.optimize.fmin_l_bfgs_b(eval_loss, x0.flatten(), fprime=eval_grad, maxfun=40)
+            print "{}: {}".format(i, cost)
+            x0 = random_image.get_value().astype('float64')
+            xs.append(x0)
+
+        def deprocess(x):
+            x = np.copy(x[0])
+            x += self.mean_img[:, np.newaxis, np.newaxis]
+
+            x = x[::-1]
+            x = np.swapaxes(np.swapaxes(x, 0, 1), 1, 2)
+
+            x = np.clip(x, 0, 255).astype('uint8')
+            return x
+
+        plt.figure(figsize=(12, 12))
+        for i in range(9):
+            plt.subplot(3, 3, i + 1)
+            plt.gca().xaxis.set_visible(False)
+            plt.gca().yaxis.set_visible(False)
+            plt.imshow(deprocess(xs[i]))
+        plt.tight_layout()
+        plt.show()
+
+        plt.figure(figsize=(8, 8))
+        plt.imshow(deprocess(xs[-1]), interpolation='nearest')
+        plt.show()
 
     def compute_features(self, img):
         # Compute layer activations
@@ -110,15 +204,15 @@ class VGG19Styler(object):
         }
         return features
 
-    def forward(self, x):
-        output = lasagne.layers.get_output(self.model, deterministic=True)
-        process = theano.function([self.X], output)
-        return process(x)
-
-    def predict(self, x, n=1):
-        out = self.forward(x)
-        idx = np.argsort(out[0])[-1:-6:-1]
-        return self.output_labels[idx]
+    # def forward(self, x):
+    #     output = lasagne.layers.get_output(self.model, deterministic=True)
+    #     process = theano.function([self.X], output)
+    #     return process(x)
+    #
+    # def predict(self, x, n=1):
+    #     out = self.forward(x)
+    #     idx = np.argsort(out[0])[-1:-6:-1]
+    #     return self.output_labels[idx]
 
     def prep_image(self, path):
 
@@ -182,22 +276,21 @@ def style_loss(A, X, layer):
     loss = 1. / (4 * N ** 2 * M ** 2) * ((G - A) ** 2).sum()
     return loss
 
+def total_variation_loss(x):
+    return (((x[:,:,:-1,:-1] - x[:,:,1:,:-1])**2 + (x[:,:,:-1,:-1] - x[:,:,:-1,1:])**2)**1.25).sum()
+
+
+
+
 
 if __name__ == '__main__':
-    net = VGG19Styler()
+    net = VGG19StylerTheano()
+    _, img = net.prep_image("../dumps/tue.jpg")
+    _, style_img = net.prep_image("../dumps/vg.jpg")
 
-    # Loading image
-    # img = imread("dumps/girl.jpg")
-    # img = np.moveaxis(img, 2, 0).astype(np.float64)
-    # img = preprocess(img)
-    # img = np.expand_dims(img, 0).astype(np.float64)
-    raw_img, img = net.prep_image("dumps/girl.jpg")
-    #img = np.expand_dims(img, 0).astype(np.float64)
 
-    #img = np.random.rand(1, 3, 224, 224).astype(np.float64)
+    print img.shape, img.dtype
 
-    print img.shape
-
-    net.process(img, img)
+    net.process(img, style_img)
 
     #print net.forward(img).shape
