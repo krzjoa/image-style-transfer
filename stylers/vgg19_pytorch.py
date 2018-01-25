@@ -13,6 +13,19 @@ from base import BaseStyler
 import numpy as np
 
 
+# ====================================================================== #
+#                               PARAMETERS                               #
+# ====================================================================== #
+
+content_layers_default = ['conv_4']
+style_layers_default = ['conv_1', 'conv_2', 'conv_3', 'conv_4', 'conv_5']
+
+
+# ====================================================================== #
+#                               LOADING IMAGE                            #
+# ====================================================================== #
+
+
 def load_image(path):
     img = plt.imread(path)
     transformer = transforms.Compose(
@@ -29,12 +42,11 @@ def load_image(path):
     return img.unsqueeze(0)
 
 
-
-
 class Vgg19Styler(BaseStyler):
 
     def __init__(self):
         self.model = models.vgg19(pretrained=True)
+        #self.model.cuda()
 
     def compute_features(self, img):
         '''
@@ -62,7 +74,7 @@ class Vgg19Styler(BaseStyler):
                 layer._forward_hooks = OrderedDict()
                 layer.register_forward_hook(save_features)
 
-        output = self.model.features.forward(img)
+        self.model.features.forward(img)
 
         return features
 
@@ -81,21 +93,24 @@ class Vgg19Styler(BaseStyler):
         style_features = self.compute_features(style)
         random_features = self.compute_features(random_image)
 
-        total_loss = get_loss(random_features, original_features, style_features)
+        opt = optim.LBFGS([random_image])
 
-        # Gradient
-        total_loss.backward()
-        print "Gradient"
-        print random_image.grad.shape
+        # Loss function
+        def loss_fun():
+            opt.zero_grad()
+            total_loss = get_loss(random_features, original_features, style_features)
+            total_loss.backward(retain_graph=True)
+            return total_loss
 
+        print "Optimizing..."
         # Optimization
         for i in range(8):
-            scipy.optimize.fmin_l_bfgs_b(total_loss.data, )
+            loss_val = opt.step(loss_fun)
+            print "Iter {}: {}".format(i, loss_val)
 
 
-        print total_loss
 
-
+        #print total_loss
 
     def load_process(self, original_path, style_path):
 
@@ -110,15 +125,15 @@ class Vgg19Styler(BaseStyler):
 # ================================================== #
 
 
-def get_loss(random_fm_list, content_fm_list, style_fm_list, alpha=0.01):
+def get_loss(random_fm_list, content_fm_list, style_fm_list, alpha=0.001):
 
-    print "Getting loss..."
+    # print "Getting loss..."
 
     total_loss = []
 
     for rf, cf, sf in zip(random_fm_list, content_fm_list, style_fm_list):
-        #total_loss.append(alpha * style_loss(rf, sf))
-        total_loss.append(alpha*content_loss(rf, cf))
+        total_loss.append(alpha * style_loss(rf, sf))
+        total_loss.append(alpha * content_loss(rf, cf))
 
     return sum(total_loss)
 
@@ -171,15 +186,10 @@ def style_loss(radom_fm, style_fm):
 
 
 def gram_matrix(x):
-
-    # TODO: Refactor to full PyTorch
-
-    x = x.numpy()
-    x = x.reshape(x.shape[0], x.shape[1], -1)
-    g = np.tensordot(x, x, axes=([2], [2]))
-    return torch.FloatTensor(g)
-
-
+    a, b, c, d = x.size()
+    features = x.view(a*b, c*d)
+    G = torch.mm(features, features.t())
+    return G.div(a* b * c *d)
 
 
 

@@ -161,7 +161,6 @@ class VGG19StylerTheano(BaseStyler):
             random_image.set_value(x0)
             return np.array(f_grad()).flatten().astype('float64')
 
-
         x0 = random_image.get_value().astype('float64')
         xs = []
         xs.append(x0)
