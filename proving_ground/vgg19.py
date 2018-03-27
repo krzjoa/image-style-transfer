@@ -9,7 +9,7 @@ import scipy.optimize
 from torch.autograd import Variable
 from torchvision import models, transforms
 import matplotlib.pyplot as plt
-from base import BaseStyler
+from stylers.base import BaseStyler
 import numpy as np
 
 
@@ -75,7 +75,6 @@ class Vgg19Styler(BaseStyler):
                 layer.register_forward_hook(save_features)
 
         self.model.features.forward(img)
-
         return features
 
     def process(self, original, style):
@@ -98,6 +97,7 @@ class Vgg19Styler(BaseStyler):
         # Loss function
         def loss_fun():
             opt.zero_grad()
+            self.model.features(random_image)
             total_loss = get_loss(random_features, original_features, style_features)
             total_loss.backward(retain_graph=True)
             return total_loss
@@ -107,10 +107,6 @@ class Vgg19Styler(BaseStyler):
         for i in range(8):
             loss_val = opt.step(loss_fun)
             print "Iter {}: {}".format(i, loss_val)
-
-
-
-        #print total_loss
 
     def load_process(self, original_path, style_path):
 
@@ -201,3 +197,8 @@ if __name__ == '__main__':
     STYLE ="../dumps/vg.jpg"
 
     styler.load_process(IMG, STYLE)
+
+
+
+
+

@@ -18,7 +18,7 @@ import copy
 
 content_layers_default = ['conv_4']
 style_layers_default = ['conv_1', 'conv_2', 'conv_3', 'conv_4', 'conv_5']
-
+runs = 200
 
 # ====================================================================== #
 #                               LOADING IMAGE                            #
@@ -46,96 +46,89 @@ class Vgg19Styler(BaseStyler):
     def __init__(self,):
         self.model = models.vgg19(pretrained=True)
 
+    def compute_features(self, content_img, style_img, style_weight=1000, content_weight=1):
         cnn = copy.deepcopy(self.model.features)
 
         # Loss
-        content_loss = []
-        style_loss = []
+        content_loss_all = []
+        style_loss_all = []
 
         # A new model
         model = nn.Sequential()
         gram = GramMatrix()
 
-
         i = 1
         for layer in list(cnn):
-            if isinstance(layer, nn.Conv2d):
-                name = "conv_{}".format(i)
+            if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.ReLU):
+                name = "conv_{}".format(i) if isinstance(layer, nn.Conv2d) else "relu_{}".format(i)
                 model.add_module(name, layer)
 
-            if name in content_layers_default:
-                target = model()
+                if name in content_layers_default:
+                    target = model(content_img).clone()
+                    content_loss = ContentLoss(target, content_weight)
+                    model.add_module("content_loss_{}".format(i), content_loss)
+                    content_loss_all.append(content_loss)
+
+                if name in style_layers_default:
+                    target_feature = model(style_img).clone()
+                    target_feature_gram = gram(target_feature)
+                    style_loss = StyleLoss(target_feature_gram, style_weight)
+                    model.add_module("style_loss_{}".format(i), style_loss)
+                    content_loss_all.append(style_loss)
+
+                i += 1
+
+            if isinstance(layer, nn.MaxPool2d):
+                name = "pool_{}".format(i)
+                model.add_module(name, layer)
+
+        return model, style_loss_all, content_loss_all
 
 
+    def process(self, content, style):
 
-
-
-
-
-
-    # def compute_features(self, img):
-    #     '''
-    #
-    #     Compute intermediate activations
-    #
-    #     Parameters
-    #     ----------
-    #     img: torch.autograd.Variable
-    #
-    #     Returns
-    #     -------
-    #     features: list of torch.Tensor
-    #         Feature maps
-    #
-    #     '''
-    #     features = []
-    #
-    #     # Forward hook
-    #     def save_features(self, inp, out):
-    #         features.append(out)
-    #
-    #     for layer in self.model.features:
-    #         if isinstance(layer, nn.ReLU):
-    #             layer._forward_hooks = OrderedDict()
-    #             layer.register_forward_hook(save_features)
-    #
-    #     self.model.features.forward(img)
-    #
-    #     return features
-
-    def process(self, original, style):
-
-        original = Variable(original)
+        content = Variable(content)
         style = Variable(style)
 
         # Random image
-        random_image = torch.rand(*list(original.shape))
-        random_image = Variable(random_image, requires_grad=True)
+        random_image = torch.rand(*list(content.shape))
+        random_image_param = nn.Parameter(random_image)
+        #random_image = Variable(random_image, requires_grad=True)
 
-        # Computing features
-        print "Computing features..."
-        original_features = self.compute_features(original)
-        style_features = self.compute_features(style)
-        random_features = self.compute_features(random_image)
+        model, style_losses, content_losses = self.compute_features(content, style)
 
-        opt = optim.LBFGS([random_image])
-
-        # Loss function
-        def loss_fun():
-            opt.zero_grad()
-            total_loss = get_loss(random_features, original_features, style_features)
-            total_loss.backward(retain_graph=True)
-            return total_loss
+        opt = optim.LBFGS([random_image_param])
 
         print "Optimizing..."
         # Optimization
-        for i in range(8):
-            loss_val = opt.step(loss_fun)
+
+        for i in range(runs):
+        # Loss function
+            def closure():
+                random_image_param.data.clamp_(0, 1)
+
+                opt.zero_grad()
+                self.model(random_image_param)
+                style_score = 0
+                content_score = 0
+
+                for sl in style_losses:
+                    style_score += sl.backward()
+                for cl in content_losses:
+                    content_score += cl.backward()
+
+                if i % 50 == 0:
+                    print("run {}:".format(runs))
+                    print('Style Loss : {:4f} Content Loss: {:4f}'.format(
+                        style_score.data[0], content_score.data[0]))
+                    print()
+                return style_score + content_score
+
+            loss_val = opt.step(closure)
             print "Iter {}: {}".format(i, loss_val)
 
-
-
-        #print total_loss
+        random_image_param.data.clamp_(0, 1)
+        return random_image_param.data
 
     def load_process(self, original_path, style_path):
 
@@ -157,10 +150,10 @@ class ContentLoss(nn.Module):
         self.weight = weight
         self.criterion = nn.MSELoss()
 
-    def forward(self, *input):
-        inp = input[0]
-        self.loss = self.criterion(inp * self.weight, self.target)
-        self.output = inp
+    def forward(self, input):
+        #inp = input[0]
+        self.loss = self.criterion(input * self.weight, self.target)
+        self.output = input
 
     def backward(self, retain_graph=True):
         self.loss.backward(retain_graph=retain_graph)
@@ -169,12 +162,12 @@ class ContentLoss(nn.Module):
 
 class GramMatrix(nn.Module):
 
-    def forward(self, *input):
-        input = input[0]
+    def forward(self, input):
+        #input = input[0]
         a, b, c, d = input.size()
         features = input.view(a*b, c*d)
         G = torch.mm(features, features.t())
-        return G.div(a * b, c * d)
+        return G.div(a * b * c * d)
 
 
 class StyleLoss(nn.Module):
@@ -186,9 +179,10 @@ class StyleLoss(nn.Module):
         self.gram = GramMatrix()
         self.criterion = nn.MSELoss()
 
-    def forward(self, *input):
-        inp = input[0]
-        self.G = self.gram(inp)
+    def forward(self, input):
+        #inp = input[0]
+        self.output = input.clone()
+        self.G = self.gram(input)
         self.G.mul_(self.weight)
         self.loss = self.criterion(self.G, self.target)
         return self.output
